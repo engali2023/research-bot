@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, send_file
 from google import genai
 from google.genai import types
 import markdown
@@ -10,8 +9,6 @@ from arabic_reshaper import reshape
 from bidi.algorithm import get_display
 
 load_dotenv()
-
-app = Flask(__name__)
 
 MODEL = "gemini-3.8-flash"
 
@@ -32,7 +29,6 @@ SYSTEM_INSTRUCTION = """You are an expert research assistant. Your tasks:
 
 
 def process_arabic_text(text):
-    """Process Arabic text for correct RTL rendering in PDF"""
     try:
         reshaped = reshape(text)
         return get_display(reshaped)
@@ -40,136 +36,168 @@ def process_arabic_text(text):
         return text
 
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+def serve_static_file(filepath):
+    full_path = os.path.join(os.path.dirname(__file__), filepath)
+    if os.path.exists(full_path):
+        content_type_map = {
+            ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript",
+            ".ttf": "font/ttf",
+        }
+        ext = os.path.splitext(filepath)[1]
+        content_type = content_type_map.get(ext, "application/octet-stream")
+        with open(full_path, "rb") as f:
+            content = f.read()
+        return content, {"Content-Type": content_type}
+    return None, {}
 
 
-@app.route("/chat", methods=["POST"])
-def chat():
-    data = request.get_json()
-    user_message = data.get("message", "")
-
-    # Use API key from request (user-provided) or fallback to environment variable
-    provided_key = data.get("api_key")
+def handle_chat(request_body):
+    data = request_body.get("message", "")
+    provided_key = request_body.get("api_key")
     api_key = provided_key if provided_key else os.getenv("GOOGLE_API_KEY")
 
     if not api_key:
-        return jsonify({"error": "No API key provided. Please set your API key in Settings."}), 401
+        return {"error": "No API key provided. Please set your API key in Settings."}, 401
 
     try:
-        temp_client = genai.Client(api_key=api_key)
-        response = temp_client.models.generate_content(
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
             model=MODEL,
-            contents=user_message,
+            contents=data,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
             ),
         )
-        return jsonify({"reply": response.text})
+        return {"reply": response.text}, 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return {"error": str(e)}, 500
 
 
-@app.route("/export/markdown", methods=["POST"])
-def export_markdown():
-    data = request.get_json()
-    content = data.get("content", "")
+def handle_export_markdown(content):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"research_{timestamp}.md"
-    filepath = os.path.join("exports", filename)
+    exports_dir = os.path.join(os.path.dirname(__file__), "exports")
+    os.makedirs(exports_dir, exist_ok=True)
+    filepath = os.path.join(exports_dir, filename)
 
-    os.makedirs("exports", exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
 
-    return send_file(filepath, as_attachment=True, download_name=filename)
+    with open(filepath, "rb") as f:
+        content_bytes = f.read()
+    return content_bytes, {
+        "Content-Type": "text/markdown",
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
 
 
-@app.route("/export/pdf", methods=["POST"])
-def export_pdf():
-    data = request.get_json()
-    content = data.get("content", "")
+def handle_export_pdf(content):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     pdf_filename = f"research_{timestamp}.pdf"
-    pdf_filepath = os.path.join("exports", pdf_filename)
-
-    os.makedirs("exports", exist_ok=True)
+    exports_dir = os.path.join(os.path.dirname(__file__), "exports")
+    os.makedirs(exports_dir, exist_ok=True)
+    pdf_filepath = os.path.join(exports_dir, pdf_filename)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # Register Arabic-supporting font
-    font_path = os.path.join("fonts", "arial.ttf")
-    if not os.path.exists(font_path):
-        alt_paths = [
-            r"C:\Windows\Fonts\arial.ttf",
-            os.path.join("fonts", "dejavusans.ttf"),
-        ]
-        for path in alt_paths:
-            if os.path.exists(path):
-                font_path = path
-                break
-
+    font_path = os.path.join(os.path.dirname(__file__), "fonts", "arial.ttf")
     if os.path.exists(font_path):
         pdf.add_font("Arial", "", font_path, uni=True)
-        bold_path = font_path.replace(".ttf", "bd.ttf") if "arial.ttf" in font_path else font_path
+        bold_path = font_path.replace(".ttf", "bd.ttf")
         if os.path.exists(bold_path):
             pdf.add_font("Arial", "B", bold_path, uni=True)
         else:
             pdf.add_font("Arial", "B", font_path, uni=True)
-    else:
-        pdf.add_font("Helvetica", "", size=11)
-
-    try:
         pdf.set_font("Arial", size=11)
-    except Exception:
+    else:
         pdf.set_font("Helvetica", size=11)
 
     lines = content.split("\n")
     for line in lines:
         stripped = line.strip()
-
         if stripped.startswith("## "):
-            try:
-                pdf.set_font("Arial", style="B", size=14)
-            except Exception:
-                pdf.set_font("Helvetica", style="B", size=14)
+            pdf.set_font("Arial", style="B", size=14)
             text = stripped.replace("## ", "")
             processed_text = process_arabic_text(text)
             pdf.cell(0, 10, processed_text, new_x="LMARGIN", new_y="NEXT")
             pdf.ln(3)
-
         elif stripped.startswith("- ") or stripped.startswith("* "):
-            try:
-                pdf.set_font("Arial", size=11)
-            except Exception:
-                pdf.set_font("Helvetica", size=11)
+            pdf.set_font("Arial", size=11)
             text = stripped[2:]
             processed_text = process_arabic_text(text)
             pdf.multi_cell(0, 7, chr(8226) + " " + processed_text)
             pdf.ln(1)
-
         elif stripped == "---":
             pdf.set_draw_color(200, 200, 200)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
             pdf.ln(5)
-
         elif not stripped:
             pdf.ln(3)
-
         else:
-            try:
-                pdf.set_font("Arial", size=11)
-            except Exception:
-                pdf.set_font("Helvetica", size=11)
+            pdf.set_font("Arial", size=11)
             processed_text = process_arabic_text(stripped)
             pdf.multi_cell(0, 7, processed_text)
             pdf.ln(2)
 
     pdf.output(pdf_filepath)
-    return send_file(pdf_filepath, as_attachment=True, download_name=pdf_filename)
+
+    with open(pdf_filepath, "rb") as f:
+        content_bytes = f.read()
+    return content_bytes, {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": f'attachment; filename="{pdf_filename}"',
+    }
+
+
+def handler(request):
+    path = request.get("path", "/")
+    method = request.get("method", "GET")
+
+    # Serve index.html for root path
+    if path == "/" or path == "":
+        html_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
+        if os.path.exists(html_path):
+            with open(html_path, "r", encoding="utf-8") as f:
+                return f.read(), {"Content-Type": "text/html; charset=utf-8"}
+
+    # Serve static files
+    if path.startswith("/static/"):
+        filepath = path.lstrip("/")
+        content, headers = serve_static_file(filepath)
+        if content:
+            return content, headers
+
+    # Chat endpoint
+    if path == "/chat" and method == "POST":
+        body = request.get("body", {})
+        result, status = handle_chat(body)
+        return result, {"Content-Type": "application/json"}, status
+
+    # Export Markdown
+    if path == "/export/markdown" and method == "POST":
+        body = request.get("body", {})
+        content = body.get("content", "")
+        result, headers = handle_export_markdown(content)
+        return result, headers
+
+    # Export PDF
+    if path == "/export/pdf" and method == "POST":
+        body = request.get("body", {})
+        content = body.get("content", "")
+        result, headers = handle_export_pdf(content)
+        return result, headers
+
+    # Default: serve index.html
+    html_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
+    if os.path.exists(html_path):
+        with open(html_path, "r", encoding="utf-8") as f:
+            return f.read(), {"Content-Type": "text/html; charset=utf-8"}
+
+    return "Not Found", {"Content-Type": "text/plain"}, 404
 
 
 if __name__ == "__main__":
