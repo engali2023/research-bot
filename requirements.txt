@@ -1,0 +1,6 @@
+google-genai==0.3.0
+fpdf2==2.8.0
+arabic-reshaper==3.0.0
+python-bidi==0.6.0
+markdown==3.6
+python-dotenv==1.0.0
