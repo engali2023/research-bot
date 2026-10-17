@@ -1,0 +1,9 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+exports/
+.vscode/
+key.txt
+hello_agent.py
+research_agent.py
